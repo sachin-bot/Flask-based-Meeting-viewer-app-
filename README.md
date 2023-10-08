@@ -1,4 +1,5 @@
 # Flask-based-Meeting-viewer-app-
+Note : this is sample application, for production it is recommended to use web server WSGI.
 GUI based application to view the meetings and its settings using Graph API
 
 This is python Flask based script using MS Graph API to retrieve the outlook calandar events. 
