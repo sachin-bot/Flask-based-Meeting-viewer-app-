@@ -1,0 +1,253 @@
+# main python code
+
+
+import atexit
+import urllib.parse
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, send_file
+import re
+import requests
+import msal
+import os.path
+from io import StringIO
+import csv
+from flask import make_response
+app = Flask(__name__)
+app.secret_key = 'set any secret key'
+
+
+
+
+client_id="Your client ID here"
+client_secret="Your client secret here"
+tenant_id="Your tenant ID here"
+
+GRAPH_ENDPOINT = 'https://graph.microsoft.com/v1.0/'
+
+AUTHORITY = 'https://login.microsoftonline.com/' + tenant_id
+ENDPOINT = 'https://graph.microsoft.com/v1.0/'
+SCOPES = ['User.Read', 'User.ReadBasic.All']
+
+def token():
+    cache = msal.SerializableTokenCache ( )
+    if os.path.exists ('token_cache.bin'):
+        cache.deserialize (open ('token_cache.bin', 'r').read ( ))
+    atexit.register (
+        lambda: open ('token_cache.bin', 'w').write (cache.serialize ( )) if cache.has_state_changed else None)
+    app = msal.PublicClientApplication (client_id, authority=AUTHORITY, token_cache=cache)
+    accounts = app.get_accounts ( )
+    result = None
+    if len (accounts) > 0:
+        result = app.acquire_token_silent (SCOPES, account=accounts[0])
+    if result is None:
+        flow = app.initiate_device_flow (scopes=SCOPES)
+        print(flow)
+        if 'user_code' not in flow:
+            raise Exception ('Failed to create device flow')
+        result = app.acquire_token_by_device_flow (flow)
+        print (result)
+
+    if 'access_token' in result:
+        access_token= result['access_token']
+
+        return access_token
+
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    events_data = []
+    if request.method == 'POST':
+        try:
+            email = request.form['email']
+            start_date = request.form['start_date']
+            end_date = request.form['end_date']
+            if '@' in email:
+                events_data = fetch_calendar_events(email, start_date, end_date)
+                session['events_data'] = events_data
+                return render_template('index.html', events_data=events_data)
+            if'https' in email:
+                print("join link entered")
+                meeting_data = Joinlink(email)
+                return render_template('view_meeting.html', meeting_data=meeting_data)
+
+            input_string=email.replace(" ","")
+            if input_string.isdigit():
+                print(input_string)
+                meeting_data = meetingID(email)
+                return render_template('view_meeting.html', meeting_data=meeting_data)
+
+
+
+        except Exception as e:
+            error_message = "An error occurred while processing your request."
+            return render_template('index.html', error_message=error_message)
+        events_data = session.get ('events_data')
+
+    return render_template ('index.html', events_data=events_data)
+
+
+
+
+def get_access_token():
+    url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/token"
+    data = {
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "resource": "https://graph.microsoft.com"
+    }
+    response = requests.post(url, data=data)
+    return response.json().get("access_token")
+
+
+def fetch_calendar_events(user_email, start_time, end_time):
+    headers = {
+        'Authorization': f'Bearer {get_access_token()}'
+    }
+
+    response = requests.get(GRAPH_ENDPOINT + f"users?$filter=mail eq '{user_email}'", headers=headers)
+    user_data = response.json()
+    print(user_data)
+
+    events_data = []
+
+    if 'value' in user_data:
+        user = user_data['value'][0]
+        user_id = user['id']
+        query = f"users/{user_id}/events?$top=50"
+
+        if start_time and end_time:
+            query += f"&$filter=start/dateTime ge '{start_time}T00:00:00' and end/dateTime le '{end_time}T23:59:59'"
+
+        while query:
+            resp = requests.get(GRAPH_ENDPOINT + query, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                if "value" in data:
+                    for event in data["value"]:
+                        body_preview = event.get('bodyPreview', '')
+                        meeting_id_match = re.search(r"Meeting ID: (.+)$", body_preview, re.MULTILINE)
+                        meeting_id = meeting_id_match.group(1) if meeting_id_match else 'N/A'
+                        mtid = meeting_id.replace(" ","")
+                        global web
+                        Web = event.get('joinUrl', '')
+
+
+                        events_data.append({
+                            "subject": event.get('subject', ''),
+                            "meeting_id": meeting_id,
+                            "webLink": event.get('webLink', ''),
+                            "start": event.get('start', {}).get('dateTime', ''),
+                            "end": event.get('end', {}).get('dateTime', ''),
+                            "location": event.get('location', {}).get('displayName', 'Not specified'),
+                            "organizer": event.get('organizer', {}).get('emailAddress', {}).get('name', 'N/A')
+                        })
+
+                    query = data.get('@odata.nextLink')
+                else:
+                    break
+            else:
+                break
+        return events_data
+
+
+@app.route('/view/<emt>', methods=['GET'])
+
+def view_meeting(emt):
+    meeting_data = Get_Meeting(emt)
+    return render_template('view_meeting.html', meeting_data=meeting_data)
+
+@app.route('/join<webmail>', methods=['GET'])
+def view_joinlink(webmail):
+    meeting_data = Joinlink(webmail)
+    return render_template('view_meeting.html', meeting_data=meeting_data)
+
+@app.route('/id<code>', methods=['GET'])
+def view_meetingid(code):
+    meeting_data = meetingID(code)
+    return render_template('view_meeting.html', meeting_data=meeting_data)
+
+def Get_Meeting(mtid):
+    access_token =token()
+    encoded_mtid = urllib.parse.quote (mtid)
+    emt = encoded_mtid.replace('%20','')
+
+    result = requests.get (f"{ENDPOINT}me/onlineMeetings?$filter=joinMeetingIdSettings/joinMeetingId%20eq%20'{emt}'", headers={'Authorization': 'Bearer ' + access_token})
+    try:
+        meeting_data=result.json()
+
+
+    except requests.exceptions.HTTPError as http_err:
+        print (f"HTTP error occurred: {http_err}")
+        print ("Response content:")
+        print (result.content)
+    except Exception as err:
+        print (f"An error occurred: {err}")
+
+    return meeting_data
+
+
+def Joinlink(email):
+    access_token =token()
+    weblink = email
+    join = requests.get (f"{ENDPOINT}me/onlineMeetings?$filter=JoinWebUrl eq '{weblink}'",headers={'Authorization': 'Bearer' + access_token})
+
+    try:
+        meeting_data_link=join.json()
+        print(type(meeting_data_link))
+
+
+    except requests.exceptions.HTTPError as http_err:
+        print (f"HTTP error occurred: {http_err}")
+        print ("Response content:")
+
+    except Exception as err:
+        print (f"An error occurred: {err}")
+
+    return meeting_data_link
+
+
+def meetingID(email):
+    access_token = token()
+    code = email.replace(" ","")
+
+
+    ID = requests.get (f"{ENDPOINT}me/onlineMeetings?$filter=joinMeetingIdSettings/joinMeetingId%20eq%20'{code}'",headers={'Authorization': 'Bearer ' + access_token})
+    try:
+        meeting_data_ID=ID.json()
+
+
+    except requests.exceptions.HTTPError as http_err:
+        print (f"HTTP error occurred: {http_err}")
+        print ("Response content:")
+
+    except Exception as err:
+        print (f"An error occurred: {err}")
+
+    return meeting_data_ID
+
+
+@app.route ('/export', methods=['POST'])
+def export_selected_events():
+    selected_event_ids = request.form.getlist ('selected_events')
+    selected_event_ids = [event_id.strip ( ) for event_id in selected_event_ids]  # Clean up meeting_id values
+    events_data = session.get ('events_data', [])
+
+    selected_events = [event for event in events_data if event['meeting_id'].strip ( ) in selected_event_ids]
+
+    if selected_events:
+        csv_output = StringIO ( )
+        csv_writer = csv.DictWriter (csv_output,fieldnames=['subject', 'meeting_id', 'webLink', 'start', 'end', 'location','organizer'])
+        csv_writer.writeheader ( )
+        csv_writer.writerows (selected_events)
+
+        response = make_response (csv_output.getvalue ( ))
+        response.headers["Content-Disposition"] = "attachment; filename=selected_events.csv"
+        response.headers["Content-type"] = "text/csv"
+
+        return response
+
+    flash ('No selected events to export.', 'warning')
+    return redirect ('/')
+
+if __name__ == '__main__':
+    app.run(host="localhost",port=5000,debug=True)
